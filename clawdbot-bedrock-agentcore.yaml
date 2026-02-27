@@ -275,11 +275,12 @@ Resources:
               GHEOF
               chmod 600 /root/.config/gh/hosts.yml
 
-              # Clone repo with token embedded in URL (avoids credential helper issues)
+              # Clone repos with token embedded in URL (avoids credential helper issues)
               git clone "https://dgarwin:$GH_PAT@github.com/dgarwin/dgarwin-openclaw.git" /opt/openclaw-repo
+              git clone "https://dgarwin:$GH_PAT@github.com/dgarwin/dgarwin-openclaw-scripts.git" /opt/openclaw-scripts
 
               export GH_PAT="$GH_PAT"
-              bash /opt/openclaw-repo/userdata.sh
+              bash /opt/openclaw-scripts/userdata.sh
 
               echo "=========================================="
               echo "Bootstrap complete: $(date)"
