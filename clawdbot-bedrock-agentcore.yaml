@@ -1,0 +1,348 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'OpenClaw - GitHub-Sourced Deployment with ASG'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Instance Configuration"
+        Parameters:
+          - InstanceType
+          - KeyPairName
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: "t4g.small"
+    Description: "Graviton (ARM) recommended for 20-40% better price-performance. x86 also supported."
+    AllowedValues:
+      - "t4g.small"
+      - "t4g.medium"
+      - "t4g.large"
+      - "t4g.xlarge"
+      - "c7g.large"
+      - "c7g.xlarge"
+      - "t3.small"
+      - "t3.medium"
+      - "t3.large"
+      - "c5.xlarge"
+
+  KeyPairName:
+    Type: String
+    Default: "openclaw"
+    Description: "EC2 key pair name (optional — no SSH rule exists; for emergency SSM shell use only)"
+
+Conditions:
+  UseGraviton: !Or
+    - !Equals [!Select [0, !Split ['.', !Ref InstanceType]], 't4g']
+    - !Equals [!Select [0, !Split ['.', !Ref InstanceType]], 'c7g']
+    - !Equals [!Select [0, !Split ['.', !Ref InstanceType]], 'm7g']
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
+
+Resources:
+
+  # ==================== VPC ====================
+  OpenClawVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "10.0.0.0/16"
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpc"
+
+  OpenClawSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      CidrBlock: "10.0.1.0/24"
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-subnet"
+
+  OpenClawIGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-igw"
+
+  AttachIGW:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      InternetGatewayId: !Ref OpenClawIGW
+
+  OpenClawRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-rt"
+
+  OpenClawRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachIGW
+    Properties:
+      RouteTableId: !Ref OpenClawRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref OpenClawIGW
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref OpenClawSubnet
+      RouteTableId: !Ref OpenClawRouteTable
+
+  # ==================== IAM ====================
+  OpenClawInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+        - 'arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy'
+      Policies:
+        - PolicyName: OpenClawSSMSecretsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadSecrets
+                Effect: Allow
+                Action:
+                  - 'ssm:GetParameter'
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/github-pat'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/anthropic-key'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/discord-token'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/openclaw-agentcore/gateway-token'
+              - Sid: WriteGatewayToken
+                Effect: Allow
+                Action:
+                  - 'ssm:PutParameter'
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/openclaw-agentcore/gateway-token'
+              - Sid: KMSDecrypt
+                Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:GenerateDataKey'
+                Resource: '*'
+                Condition:
+                  StringLike:
+                    'kms:RequestAlias': 'alias/aws/ssm'
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-instance-role"
+
+  OpenClawInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref OpenClawInstanceRole
+
+  # ==================== Security Group ====================
+  OpenClawSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "OpenClaw instance security group - egress only, no inbound"
+      VpcId: !Ref OpenClawVPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-sg"
+
+  # ==================== Launch Template ====================
+  OpenClawLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${AWS::StackName}-lt"
+      LaunchTemplateData:
+        ImageId: !If
+          - UseGraviton
+          - '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id}}'
+          - '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id}}'
+        InstanceType: !Ref InstanceType
+        KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref AWS::NoValue]
+        IamInstanceProfile:
+          Name: !Ref OpenClawInstanceProfile
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: true
+            Groups:
+              - !Ref OpenClawSecurityGroup
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              VolumeSize: 30
+              VolumeType: gp3
+              DeleteOnTermination: false
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub "${AWS::StackName}-gateway"
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: !Sub "${AWS::StackName}-volume"
+        UserData:
+          Fn::Base64:
+            !Sub |
+              #!/bin/bash
+              exec > >(tee /var/log/openclaw-setup.log) 2>&1
+
+              echo "=========================================="
+              echo "OpenClaw Bootstrap: $(date)"
+              echo "=========================================="
+
+              export DEBIAN_FRONTEND=noninteractive
+
+              # Ensure SSM agent is running for immediate SSM access
+              snap start amazon-ssm-agent 2>/dev/null || systemctl start amazon-ssm-agent 2>/dev/null || true
+
+              # Install base tools
+              echo "[1/4] Installing base tools..."
+              apt-get update -y
+              apt-get install -y git curl unzip
+
+              # Install AWS CLI v2
+              echo "[2/4] Installing AWS CLI..."
+              ARCH=$(uname -m)
+              if [ "$ARCH" = "aarch64" ]; then
+                curl -fsSo /tmp/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip"
+              else
+                curl -fsSo /tmp/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+              fi
+              cd /tmp && unzip -q awscliv2.zip && ./aws/install && rm -rf /tmp/aws /tmp/awscliv2.zip
+              cd /
+
+              # Install GitHub CLI
+              echo "[3/4] Installing GitHub CLI..."
+              curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+                | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+              chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+              echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+                | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+              apt-get update -y
+              apt-get install -y gh
+
+              # Detect region from IMDS
+              TOKEN_IMDS=$(curl -fsSX PUT "http://169.254.169.254/latest/api/token" \
+                -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || echo "")
+              if [ -n "$TOKEN_IMDS" ]; then
+                REGION=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN_IMDS" \
+                  http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "${AWS::Region}")
+              else
+                REGION="${AWS::Region}"
+              fi
+
+              export HOME=/root
+              export OPENCLAW_REGION="$REGION"
+              export OPENCLAW_STACK_NAME="${AWS::StackName}"
+
+              # Fetch GitHub PAT from SSM and configure auth
+              echo "[4/4] Fetching GitHub PAT and cloning repository..."
+              GH_PAT=$(aws ssm get-parameter \
+                --name "/openclaw/github-pat" \
+                --with-decryption \
+                --region "$REGION" \
+                --query 'Parameter.Value' \
+                --output text)
+
+              # GitHub auth for root (gh CLI)
+              mkdir -p /root/.config/gh
+              cat > /root/.config/gh/hosts.yml << GHEOF
+              github.com:
+                  users:
+                      dgarwin:
+                          oauth_token: $GH_PAT
+                  git_protocol: https
+                  oauth_token: $GH_PAT
+                  user: dgarwin
+              GHEOF
+              chmod 600 /root/.config/gh/hosts.yml
+
+              # Clone repo with token embedded in URL (avoids credential helper issues)
+              git clone "https://dgarwin:$GH_PAT@github.com/dgarwin/dgarwin-openclaw.git" /opt/openclaw-repo
+
+              export GH_PAT="$GH_PAT"
+              bash /opt/openclaw-repo/userdata.sh
+
+              echo "=========================================="
+              echo "Bootstrap complete: $(date)"
+              echo "=========================================="
+
+  # ==================== Auto Scaling Group ====================
+  OpenClawASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: AttachIGW
+    Properties:
+      AutoScalingGroupName: !Sub "${AWS::StackName}-asg"
+      MinSize: "1"
+      MaxSize: "1"
+      DesiredCapacity: "1"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref OpenClawLaunchTemplate
+        Version: !GetAtt OpenClawLaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier:
+        - !Ref OpenClawSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-gateway"
+          PropagateAtLaunch: true
+        - Key: Stack
+          Value: !Ref AWS::StackName
+          PropagateAtLaunch: true
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 0
+        MaxBatchSize: 1
+
+Outputs:
+  Step1InstallSSMPlugin:
+    Description: "STEP 1: Install SSM Session Manager Plugin on your local computer"
+    Value: "https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
+
+  Step2FindInstance:
+    Description: "STEP 2: Find your instance ID"
+    Value: !Sub |
+      aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${AWS::StackName}-asg --region ${AWS::Region} --query 'AutoScalingGroups[0].Instances[0].InstanceId' --output text
+
+  Step3PortForwarding:
+    Description: "STEP 3: Run on LOCAL computer — replace INSTANCE_ID from Step 2 (keep terminal open)"
+    Value: !Sub |
+      aws ssm start-session --target INSTANCE_ID --region ${AWS::Region} --document-name AWS-StartPortForwardingSession --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
+
+  Step4GetToken:
+    Description: "STEP 4: Get Gateway Token"
+    Value: !Sub |
+      aws ssm get-parameter --name "/openclaw/openclaw-agentcore/gateway-token" --region ${AWS::Region} --with-decryption --query 'Parameter.Value' --output text
+
+  Step5AccessURL:
+    Description: "STEP 5: Open in browser — replace TOKEN with output from Step 4"
+    Value: "http://localhost:18789/?token=TOKEN"
+
+  ASGName:
+    Description: "Auto Scaling Group name"
+    Value: !Ref OpenClawASG
+
+  MonthlyCost:
+    Description: "Estimated monthly cost (USD)"
+    Value: !Sub |
+      EC2 (${InstanceType}): ~$7-40 depending on type
+      EBS (30GB gp3, retained on termination): ~$2.40
+      Bedrock / Anthropic: Pay-per-use
+      Total: ~$10-43/month
