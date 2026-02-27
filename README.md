@@ -58,3 +58,20 @@ aws cloudformation create-stack \
 - ✅ Review IAM role changes carefully
 - ✅ Never grant OpenClaw write access to this repo
 - ✅ Use GitHub branch protection for main branch
+
+### Known Security Limitation
+
+⚠️ **OpenClaw can currently modify its own `openclaw.json` configuration** since it has write access to the `dgarwin-openclaw` repository. This means the agent can change its own permissions settings (e.g., `tools.exec.security`).
+
+**Current defense layers**:
+1. IAM permissions (defined in this template) limit what the EC2 instance can do in AWS
+2. GitHub repo permissions prevent access to this deployment repo
+3. Agent's built-in safety design discourages self-modification
+
+**TODO**: Add OS-level restrictions via CloudFormation:
+- Implement systemd service hardening in the UserData
+- Use AppArmor/SELinux profiles
+- Mount configuration as read-only
+- Container-based isolation
+
+See `dgarwin-openclaw-scripts/README.md` for detailed TODO list.
