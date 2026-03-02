@@ -178,7 +178,7 @@ Resources:
           Name: !Ref OpenClawInstanceProfile
         NetworkInterfaces:
           - DeviceIndex: 0
-            AssociatePublicIpAddress: true
+            AssociatePublicIpAddress: false
             Groups:
               - !Ref OpenClawSecurityGroup
         BlockDeviceMappings:
