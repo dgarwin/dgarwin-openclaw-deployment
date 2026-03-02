@@ -110,6 +110,7 @@ Resources:
               Service: ec2.amazonaws.com
             Action: 'sts:AssumeRole'
       ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonBedrockFullAccess'
         - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
         - 'arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy'
       Policies:
@@ -126,13 +127,13 @@ Resources:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/anthropic-key'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/discord-token'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/google'
-                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/openclaw-agentcore/gateway-token'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/gateway-token'
               - Sid: WriteGatewayToken
                 Effect: Allow
                 Action:
                   - 'ssm:PutParameter'
                 Resource:
-                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/openclaw-agentcore/gateway-token'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/gateway-token'
               - Sid: KMSDecrypt
                 Effect: Allow
                 Action:
@@ -330,7 +331,7 @@ Outputs:
   Step4GetToken:
     Description: "STEP 4: Get Gateway Token"
     Value: !Sub |
-      aws ssm get-parameter --name "/openclaw/openclaw-agentcore/gateway-token" --region ${AWS::Region} --with-decryption --query 'Parameter.Value' --output text
+      aws ssm get-parameter --name "/openclaw/gateway-token" --region ${AWS::Region} --with-decryption --query 'Parameter.Value' --output text
 
   Step5AccessURL:
     Description: "STEP 5: Open in browser — replace TOKEN with output from Step 4"
