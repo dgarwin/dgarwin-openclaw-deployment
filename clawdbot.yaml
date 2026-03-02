@@ -123,6 +123,7 @@ Resources:
                 Action:
                   - 'ssm:GetParameter'
                 Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/noop/*'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/*'
               - Sid: WriteSecrets
                 Effect: Allow
