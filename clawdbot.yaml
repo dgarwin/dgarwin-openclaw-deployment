@@ -13,7 +13,7 @@ Metadata:
 Parameters:
   InstanceType:
     Type: String
-    Default: "t4g.small"
+    Default: "t4g.medium"
     Description: "Graviton (ARM) recommended for 20-40% better price-performance. x86 also supported."
     AllowedValues:
       - "t4g.small"
